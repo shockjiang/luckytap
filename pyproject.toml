@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "luckytap"
+version = "0.1.0"
+description = "Automate WeChat lucky money (红包) grabbing on macOS"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python-headless>=4.8",
+    "Pillow>=10.0",
+    "numpy>=1.24",
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-Cocoa>=10.0",
+]
+
+[project.scripts]
+luckytap = "luckytap.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
