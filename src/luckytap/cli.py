@@ -14,7 +14,7 @@ import numpy as np
 
 from luckytap import __version__
 from luckytap.capture import capture_chat_area, capture_region, get_retina_scale
-from luckytap.clicker import click, press_escape, scroll
+from luckytap.clicker import click, scroll
 from luckytap.config import (
     CHAT_AREA_LEFT_RATIO,
     CONVERSATION_SWITCH_DELAY,
@@ -47,12 +47,12 @@ def _is_new(qx: int, qy: int, seen: set[tuple[int, int]]) -> bool:
     return (qx, qy) not in seen
 
 
-def _click_conversation(wx: int, wy: int, ww: int, index: int) -> None:
+def _click_conversation(wx: int, wy: int, ww: int, index: int, frame=None) -> None:
     """Click the Nth conversation in the WeChat sidebar (0-based index)."""
     sidebar_center_x = wx + int(ww * CHAT_AREA_LEFT_RATIO) // 2
     row_y = wy + SIDEBAR_TOP_OFFSET + index * SIDEBAR_ROW_HEIGHT + SIDEBAR_ROW_HEIGHT // 2
     log.debug("Clicking conversation %d at (%d, %d)", index, sidebar_center_x, row_y)
-    click(sidebar_center_x, row_y)
+    click(sidebar_center_x, row_y, f"swith conversation {index}",frame=frame)
 
 
 def _capture_template_mode(args: argparse.Namespace) -> None:
@@ -110,14 +110,25 @@ def _run_loop(args: argparse.Namespace) -> None:
     log.info("Retina scale factor: %.1f", scale)
 
     template_dir = Path(args.template_dir)
-    templates = load_templates(template_dir)
-    if not templates:
+    all_templates = load_templates(template_dir)
+    if not all_templates:
         print(
             f"ERROR: No templates found in {template_dir}. "
             "Run with --capture-template first.",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Split templates by purpose:
+    #   detect_templates — for finding red envelopes in the chat area
+    #   open_templates   — for clicking buttons in the open dialog
+    detect_templates = [(n, t) for n, t in all_templates if n.startswith("hongbao_icon")]
+    open_templates = [(n, t) for n, t in all_templates if n.startswith("open_button")]
+    log.info(
+        "Templates: %d for detection (%s), %d for open dialog (%s)",
+        len(detect_templates), [n for n, _ in detect_templates],
+        len(open_templates), [n for n, _ in open_templates],
+    )
 
     seen: set[tuple[int, int]] = set()
     last_window_check = 0.0
@@ -180,8 +191,9 @@ def _run_loop(args: argparse.Namespace) -> None:
         while not quit_event.is_set():
             now = time.monotonic()
 
-            # Periodically re-query window position
+            # Periodically re-query window position and ensure WeChat is foreground
             if now - last_window_check > WINDOW_REQUERY_INTERVAL:
+                activate_wechat()
                 new_win = get_wechat_window()
                 if new_win is not None:
                     if new_win != (wx, wy, ww, wh):
@@ -194,17 +206,21 @@ def _run_loop(args: argparse.Namespace) -> None:
                 last_window_check = now
 
             if scan:
+                # Ensure WeChat is foreground before interacting
+                activate_wechat()
+                time.sleep(0.1)
+
                 # Cycle through the top N conversations
                 for chat_idx in range(num_chats):
                     if quit_event.is_set():
                         break
 
-                    _click_conversation(wx, wy, ww, chat_idx)
+                    _click_conversation(wx, wy, ww, chat_idx, frame=None)
                     time.sleep(CONVERSATION_SWITCH_DELAY)
 
                     # Check the currently visible chat area
                     _check_and_open(
-                        wx, wy, ww, wh, templates, threshold, scale,
+                        wx, wy, ww, wh, detect_templates, open_templates, threshold, scale,
                         seen, dry_run, chat_idx,
                     )
 
@@ -219,13 +235,16 @@ def _run_loop(args: argparse.Namespace) -> None:
                         scrolled += 1
                         time.sleep(SCROLL_DELAY)
                         _check_and_open(
-                            wx, wy, ww, wh, templates, threshold, scale,
+                            wx, wy, ww, wh, detect_templates, open_templates, threshold, scale,
                             seen, dry_run, chat_idx,
                         )
 
-                    # Scroll back down to the latest messages before switching
-                    for _ in range(scrolled):
-                        scroll(chat_center_x, chat_center_y, -SCROLL_AMOUNT)
+                    # Scroll back down to the latest messages before switching.
+                    # No detection needed — these areas were already checked
+                    # during the upward scroll.
+                    if scrolled:
+                        for _ in range(scrolled):
+                            scroll(chat_center_x, chat_center_y, -SCROLL_AMOUNT)
                         time.sleep(SCROLL_DELAY)
 
                 # Clear seen set after a full scan round so envelopes in
@@ -233,7 +252,7 @@ def _run_loop(args: argparse.Namespace) -> None:
                 seen.clear()
             else:
                 _check_and_open(
-                    wx, wy, ww, wh, templates, threshold, scale,
+                    wx, wy, ww, wh, detect_templates, open_templates, threshold, scale,
                     seen, dry_run,
                 )
 
@@ -249,7 +268,8 @@ def _check_and_open(
     wy: int,
     ww: int,
     wh: int,
-    templates: list[tuple[str, np.ndarray]],
+    detect_templates: list[tuple[str, np.ndarray]],
+    open_templates: list[tuple[str, np.ndarray]],
     threshold: float,
     scale: float,
     seen: set[tuple[int, int]],
@@ -262,10 +282,10 @@ def _check_and_open(
         log.warning("Capture failed, skipping...")
         return
 
-    matches = detect_matches(frame, templates, threshold=threshold)
+    matches = detect_matches(frame, detect_templates, threshold=0.99)
     frame_w = frame.shape[1]
 
-    for name, mx, my, mw, mh, conf in matches:
+    for name, mx, my, mw, mh, conf, scale in matches:
         # Skip red packets on the right side (sent by self)
         center_x = mx + mw / 2
         if center_x > frame_w * SELF_MSG_X_RATIO:
@@ -283,25 +303,32 @@ def _check_and_open(
         seen.add(qpos)
         prefix = f"[chat {chat_idx}] " if chat_idx is not None else ""
         log.info(
-            "%sDetected '%s' at screen (%d, %d) confidence=%.3f",
-            prefix, name, screen_x, screen_y, conf,
+            "Match '%s' at screen (%d, %d) confidence=%.3f",
+            name, screen_x, screen_y, conf,
         )
 
         if dry_run:
             continue
 
         # Step 1: Click the red envelope
-        click(screen_x, screen_y)
+        click(screen_x, screen_y, "detect and click red bag", frame=frame)
         time.sleep(OPEN_BUTTON_DELAY)
 
         # Step 2: Click through the open dialog (two buttons)
         _try_click_open_buttons(
-            wx, wy, ww, wh, templates, threshold, scale
+            wx, wy, ww, wh, open_templates, threshold, scale
         )
 
-        # Step 3: Dismiss any dialog
-        press_escape()
+        # Step 3: Dismiss any dialog by clicking the chat area background.
+        # Avoid press_escape() since the global Escape listener would quit the app.
+        dismiss_x = wx + int(ww * (CHAT_AREA_LEFT_RATIO + 1) / 2)
+        dismiss_y = wy + 30  # top of chat area, unlikely to hit anything
+        # click(dismiss_x, dismiss_y, "dismiss dialog", frame=frame)
         time.sleep(DISMISS_DELAY)
+
+        # UI has changed after clicking; remaining match coordinates are stale.
+        # Break and let the outer loop re-detect with a fresh screenshot.
+        break
 
 
 def _try_click_open_buttons(
@@ -309,43 +336,29 @@ def _try_click_open_buttons(
     wy: int,
     ww: int,
     wh: int,
-    templates: list[tuple[str, np.ndarray]],
+    open_templates: list[tuple[str, np.ndarray]],
     threshold: float,
     scale: float,
 ) -> None:
-    """After clicking an envelope, handle the two-step open flow.
+    frame = capture_region(wx, wy, ww, wh)
 
-    Step 1: Detect and click the first "open" button (open_button).
-    Step 2: Detect and click the "開" confirmation button (open_button2).
-    """
-    for step, keyword in enumerate(("open_button", "open_button2"), start=1):
-        step_templates = [(n, t) for n, t in templates if n == keyword]
-        if not step_templates:
-            # Fall back to matching any template containing the keyword
-            step_templates = [(n, t) for n, t in templates if keyword in n.lower()]
-        if not step_templates:
-            log.debug("No template for step %d (%s), skipping", step, keyword)
-            continue
+    matches = detect_matches(frame, open_templates, threshold=threshold)
+    if not matches:
+        log.debug("no matches found on open stage")
+        cv2.imwrite('error-open-nomatch.jpg', frame)
+        breakpoint()
+        return
+    
 
-        frame = capture_region(wx, wy, ww, wh)
-        cv2.imwrite(f'{step}-{keyword}-frame.jpg', frame)
-        cv2.imwrite(f'{step}-{keyword}-templ.jpg', step_templates[0][1])
-        print(f'save once: {step} {keyword}')
-        if frame is None:
-            print('frame is None')
-            continue
-
-        matches = detect_matches(frame, step_templates, threshold=threshold)
-        if not matches:
-            log.debug("Step %d: no '%s' match found", step, keyword)
-            continue
-
-        _, mx, my, mw, mh, conf = matches[0]
-        sx = wx + int((mx + mw / 2) / scale)
-        sy = wy + int((my + mh / 2) / scale)
-        log.info("Step %d: clicking '%s' at (%d, %d) confidence=%.3f", step, keyword, sx, sy, conf)
-        click(sx, sy)
-        time.sleep(OPEN_BUTTON_DELAY)
+    name, mx, my, mw, mh, conf, scale = matches[0]
+    log.info(
+        "Match '%s' at screen (%d, %d) confidence=%.3f",
+        name, mx, my, conf,
+    )
+    sx = wx + int((mx + mw / 2) / scale)
+    sy = wy + int((my + mh / 2) / scale)
+    click(sx, sy, f"open {name}", frame=frame)
+    time.sleep(OPEN_BUTTON_DELAY)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -413,7 +426,7 @@ def main(argv: list[str] | None = None) -> None:
 
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
-        format="%(asctime)s [%(levelname)s] %(message)s",
+        format="%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d %(message)s",
         datefmt="%H:%M:%S",
         level=level,
     )

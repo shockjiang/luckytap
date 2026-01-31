@@ -4,7 +4,12 @@
 POLL_INTERVAL = 0.05
 
 # OpenCV template matching threshold (0.0–1.0)
-MATCH_THRESHOLD = 0.75
+MATCH_THRESHOLD = 0.95
+
+# Multi-scale template matching range (min_scale, max_scale, step)
+MATCH_SCALE_MIN = 0.5
+MATCH_SCALE_MAX = 1.5
+MATCH_SCALE_STEP = 0.1
 
 # Minimum distance (pixels) between two detections to consider them distinct
 DEDUP_DISTANCE = 30

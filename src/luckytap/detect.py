@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from luckytap.config import MATCH_THRESHOLD
+from luckytap.config import MATCH_SCALE_MAX, MATCH_SCALE_MIN, MATCH_SCALE_STEP, MATCH_THRESHOLD
 
 log = logging.getLogger(__name__)
 
@@ -51,34 +51,31 @@ def detect_matches(
     """
     results: list[tuple[str, int, int, int, int, float]] = []
     gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    scales = np.arange(MATCH_SCALE_MIN, MATCH_SCALE_MAX + MATCH_SCALE_STEP / 2, MATCH_SCALE_STEP)
 
     for name, tmpl in templates:
         th, tw = tmpl.shape[:2]
-        if tw > frame.shape[1] or th > frame.shape[0]:
-            continue
-
         gray_tmpl = cv2.cvtColor(tmpl, cv2.COLOR_BGR2GRAY)
-        match_result = cv2.matchTemplate(gray_frame, gray_tmpl, cv2.TM_CCOEFF_NORMED)
 
-        locations = np.where(match_result >= threshold)
-        for pt_y, pt_x in zip(*locations):
-            confidence = float(match_result[pt_y, pt_x])
-            results.append((name, int(pt_x), int(pt_y), tw, th, confidence))
+        for scale in scales:
+            rw, rh = int(tw * scale), int(th * scale)
+            if rw > frame.shape[1] or rh > frame.shape[0] or rw < 1 or rh < 1:
+                continue
 
-    # visualize the matching bbox and save to {name}.jpg
-    if results:
-        vis = frame.copy()
-        for name, x, y, w, h, conf in results:
-            cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(
-                vis, f"{name} {conf:.2f}", (x, y - 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1,
-            )
-        fout_name = f'matches-{name}.jpg'
-        cv2.imwrite(fout_name, vis)
-        log.debug(f"Saved match visualization to {fout_name}")
+            if scale == 1.0:
+                scaled_tmpl = gray_tmpl
+            else:
+                scaled_tmpl = cv2.resize(gray_tmpl, (rw, rh))
+
+            match_result = cv2.matchTemplate(gray_frame, scaled_tmpl, cv2.TM_CCOEFF_NORMED)
+
+            locations = np.where(match_result >= threshold)
+            for pt_y, pt_x in zip(*locations):
+                confidence = float(match_result[pt_y, pt_x])
+                results.append((name, int(pt_x), int(pt_y), rw, rh, confidence, scale))
+
     # Non-maximum suppression: keep only the best match in each cluster
-    return _nms(results)
+    return results
 
 
 def _nms(

@@ -44,7 +44,15 @@ def get_wechat_window() -> tuple[int, int, int, int] | None:
 
 
 def activate_wechat() -> None:
-    """Bring WeChat to the front using AppleScript."""
+    """Bring WeChat to the front using NSRunningApplication."""
+    from AppKit import NSApplicationActivateIgnoringOtherApps, NSWorkspace
+
+    workspace = NSWorkspace.sharedWorkspace()
+    for app in workspace.runningApplications():
+        if app.localizedName() == "WeChat":
+            app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+            return
+    # Fallback to AppleScript if NSWorkspace doesn't find it
     subprocess.run(
         ["osascript", "-e", 'tell application "WeChat" to activate'],
         check=False,

@@ -5,15 +5,28 @@ from __future__ import annotations
 import logging
 import time
 
+import cv2
+import numpy as np
 import Quartz
 
 log = logging.getLogger(__name__)
 
+CLICK_MARKER_SIZE = 15  # half-size of the marker box in pixels
 
-def click(x: int, y: int) -> None:
+
+def click(x: int, y: int, purpose: str = "", frame: np.ndarray | None = None) -> None:
     """Perform a mouse click at the given screen coordinates."""
     point = Quartz.CGPointMake(x, y)
-    log.debug("Click at (%d, %d)", x, y)
+    log.debug("Click at (%d, %d) in order to: [%s]", x, y, purpose)
+
+    if frame is not None:
+        vis = frame.copy()
+        s = CLICK_MARKER_SIZE
+        cv2.rectangle(vis, (x - s, y - s), (x + s, y + s), (0, 0, 255), 2)
+        cv2.drawMarker(vis, (x, y), (0, 0, 255), cv2.MARKER_CROSS, s, 2)
+        fname = f"click-{purpose.replace(' ', '_')}.jpg"
+        cv2.imwrite(fname, vis)
+        log.debug("Saved click visualization to %s", fname)
 
     # Mouse down
     event = Quartz.CGEventCreateMouseEvent(
